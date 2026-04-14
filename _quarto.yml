@@ -1,0 +1,42 @@
+project:
+  type: website
+  output-dir: docs
+
+website:
+  title: "💧 UNICEF Sanitation Report"
+  description: "Global analysis of improved sanitation access using UNICEF data (2000–2024)"
+  favicon: "https://www.unicef.org/favicon.ico"
+  navbar:
+    background: "#1A3C6E"
+    foreground: "white"
+    left:
+      - text: "🏠 Home"
+        href: index.qmd
+    right:
+      - text: "UNICEF Data"
+        href: "https://data.unicef.org"
+        target: "_blank"
+      - text: "SDG 6"
+        href: "https://sdgs.un.org/goals/goal6"
+        target: "_blank"
+
+format:
+  html:
+    theme: [flatly]
+    css: custom.css
+    embed-resources: true
+    code-fold: true
+    code-summary: "🔍 Show Code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    number-sections: false
+    smooth-scroll: true
+    anchor-sections: true
+
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+  message: false

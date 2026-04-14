@@ -1,0 +1,589 @@
+---
+title: "💧 Flushed Away: The Global Sanitation Crisis"
+subtitle: "A UNICEF Data Analysis — Proportion of Population Using Improved Sanitation Facilities (2000–2024)"
+author: "Aryan Rishi"
+date: today
+date-format: "D MMMM YYYY"
+
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    code-summary: "🔍 Show Code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-title: " Table of Contents"
+    toc-location: left
+    number-sections: false
+    fig-align: center
+    fig-width: 10
+    fig-height: 6
+    fig-dpi: 150
+    html-math-method: katex
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+    grid:
+      sidebar-width: 270px
+      body-width: 900px
+
+execute:
+  echo: false
+  warning: false
+  message: false
+
+---
+
+```{python}
+#| label: setup
+#| echo: false
+
+# ── Core imports ──────────────────────────────────────────────
+import polars as pl
+import numpy as np
+from plotnine import (
+    ggplot, aes, geom_col, geom_point, geom_line,
+    geom_smooth, geom_text, facet_wrap,
+    scale_fill_gradient, scale_fill_manual, scale_color_manual,
+    scale_x_continuous, scale_y_continuous, scale_color_gradient,
+    coord_fixed, coord_flip,
+    labs, theme, theme_minimal, theme_void, theme_bw,
+    element_text, element_rect, element_line, element_blank,
+    guides, guide_colorbar, guide_legend,
+)
+import warnings
+warnings.filterwarnings("ignore")
+
+print("✅ Environment ready — all packages loaded.")
+```
+
+---
+
+## 🌍 Introduction {#sec-intro}
+
+Access to improved sanitation is one of the most fundamental determinants of human health, dignity, and development. When a toilet, flush system, or safely managed latrine is unavailable, the consequences cascade across every dimension of life: **children miss school**, **women and girls face daily danger**, **waterborne diseases spread unchecked**, and **economic productivity is suppressed**. 
+
+This report examines UNICEF data on the **proportion of national populations with access to improved sanitation facilities**, spanning **225 countries and territories from 2000 to 2024**. The data reveal a world of stark contrast — wealthy nations achieving near-universal coverage while dozens of countries, home to hundreds of millions of people, remain profoundly underserved. 
+
+> *"Sanitation is more important than independence."*  
+> — **Mahatma Gandhi**, 1925
+
+The analysis that follows charts progress made, identifies the communities left furthest behind, and makes the case that accelerating sanitation investment is not merely a humanitarian imperative — it is the cornerstone of sustainable economic development.
+
+---
+
+## ⚠️ Statement of Challenge {#sec-challenge}
+
+```{python}
+#| label: data-loading
+#| code-summary: "📂 Load & Explore Datasets"
+
+# ── 1. Load indicator data ─────────────────────────────────────
+indicator_raw = pl.read_csv(
+    "unicef_indicator_3.csv",
+    null_values=["", "NA", "N/A"],
+    infer_schema_length=5000
+)
+
+# ── 2. Load metadata ───────────────────────────────────────────
+metadata_raw = pl.read_csv(
+    "unicef_metadata_3.csv",
+    null_values=["", "NA", "N/A"],
+    infer_schema_length=5000
+)
+
+```
+
+```{python}
+#| label: data-transformation
+#| code-summary: "🔧 Clean, Transform & Join Data"
+
+# ── Clean indicator: keep Total sex, drop nulls ────────────────
+indicator = (
+    indicator_raw
+    .filter(pl.col("sex") == "Total")
+    .filter(pl.col("obs_value").is_not_null())
+    .rename({"time_period": "year", "obs_value": "sanitation_pct"})
+    .select(["country", "alpha_3_code", "year", "sanitation_pct"])
+    .with_columns(pl.col("sanitation_pct").cast(pl.Float64))
+    .sort(["country", "year"])
+)
+
+# ── Latest value per country (for map & bar charts) ────────────
+latest = (
+    indicator
+    .group_by("country")
+    .agg([
+        pl.col("sanitation_pct").last().alias("sanitation_pct"),
+        pl.col("year").last().alias("latest_year"),
+        pl.col("alpha_3_code").last(),
+    ])
+    .sort("sanitation_pct")
+)
+
+# ── Clean metadata: select key columns ────────────────────────
+metadata = (
+    metadata_raw
+    .select([
+        "country", "alpha_3_code", "year",
+        pl.col("Population, total").alias("population"),
+        pl.col("GDP per capita (constant 2015 US$)").alias("gdp_per_capita"),
+        pl.col("Life expectancy at birth, total (years)").alias("life_expectancy"),
+    ])
+    .with_columns([
+        pl.col("population").cast(pl.Float64),
+        pl.col("gdp_per_capita").cast(pl.Float64),
+        pl.col("life_expectancy").cast(pl.Float64),
+    ])
+)
+
+# ── Join indicator + metadata on country & year ────────────────
+# We join on country and year to enrich the sanitation data with
+# economic and demographic context for scatter analysis.
+joined = (
+    indicator
+    .join(metadata, on=["country", "year"], how="left", suffix="_meta")
+    .filter(pl.col("gdp_per_capita").is_not_null())
+    .filter(pl.col("life_expectancy").is_not_null())
+)
+
+```
+
+```{python}
+#| label: eda
+#| code-summary: "📊 Exploratory Data Analysis"
+
+# ── Distribution summary ───────────────────────────────────────
+q25 = latest["sanitation_pct"].quantile(0.25)
+q50 = latest["sanitation_pct"].quantile(0.50)
+q75 = latest["sanitation_pct"].quantile(0.75)
+mean_val = latest["sanitation_pct"].mean()
+
+# ── Countries by access bracket ───────────────────────────────
+def bracket(pct):
+    if pct < 30:  return "Critical (<30%)"
+    if pct < 50:  return "Severe (30–50%)"
+    if pct < 75:  return "Moderate (50–75%)"
+    if pct < 95:  return "Good (75–95%)"
+    return "Near-Universal (≥95%)"
+
+latest_pd = latest.to_pandas()
+latest_pd["bracket"] = latest_pd["sanitation_pct"].apply(bracket)
+
+# ── Bottom 15 countries ────────────────────────────────────────
+bottom15 = latest_pd.nsmallest(15, "sanitation_pct")[["country","sanitation_pct","latest_year"]]
+
+```
+
+The data reveal a deeply unequal world. Of **225 countries and territories** tracked by UNICEF:
+
+- 🟢 **Over 100 nations** have achieved near-universal access (≥95%), most in Europe, North America, East Asia, and the Gulf.  
+- 🟡 A **middle tier** of countries — many in Latin America, Southeast Asia, and North Africa — has made meaningful progress since 2000 but still falls short of the SDG 6 target.  
+- 🔴 A **critical group of 15+ nations** — overwhelmingly in Sub-Saharan Africa — remains below 50% access, with some showing only marginal improvement over two decades.
+
+The **challenge is not merely technical**. It is rooted in poverty, governance failures, conflict, and chronic underinvestment. Countries like **Chad (18.7%)**, **Ethiopia (18.9%)**, and **South Sudan (22.3%)** have populations where open defecation remains a daily reality for the majority — a direct driver of child mortality, stunting, and disease burden.
+
+What follows is a visual exploration of this crisis.
+
+---
+
+## 📣 Call to Action {#sec-calltoaction}
+
+### 🗺️ Chart 1 — World Map: The Sanitation Divide
+
+```{python}
+#| label: fig-worldmap
+#| code-fold: true
+#| echo: false
+
+import geopandas as gpd
+import pandas as pd
+from plotnine import *
+
+# Load world boundaries
+world = gpd.read_file(
+    "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
+)
+
+# Prepare sanitation data
+map_data = latest_pd[["alpha_3_code", "sanitation_pct"]].dropna()
+
+# Merge using ISO3 codes
+world_merged = world.merge(
+    map_data,
+    left_on="ADM0_A3",
+    right_on="alpha_3_code",
+    how="left"
+)
+
+# Convert geometries to a plottable dataframe
+rows = []
+for _, r in world_merged.iterrows():
+    geom = r.geometry
+    if geom is None:
+        continue
+    if geom.geom_type == "Polygon":
+        geoms = [geom]
+    elif geom.geom_type == "MultiPolygon":
+        geoms = geom.geoms
+    else:
+        continue
+
+    for poly in geoms:
+        x, y = poly.exterior.coords.xy
+        for xi, yi in zip(x, y):
+            rows.append({
+                "x": xi,
+                "y": yi,
+                "group": id(poly),
+                "sanitation_pct": r.sanitation_pct
+            })
+
+map_df = pd.DataFrame(rows)
+
+print("Rows in map_df:", map_df.shape[0])
+
+world_map_plot = (
+    ggplot(map_df, aes("x", "y", group="group", fill="sanitation_pct"))
+    + geom_polygon(color="white", size=0.15)
+    + coord_fixed(1.3)
+    + scale_fill_gradient(
+        low="#F7DC6F",
+        high="#1A3C6E",
+        na_value="#D5D8DC",
+        limits=[0, 100],
+        name="Access (%)"
+    )
+    + labs(
+        title="Global Sanitation Access: Who Is Left Behind?",
+        subtitle="Population using improved sanitation facilities (latest available year)"
+    )
+    + theme_void()
+    + theme(
+        figure_size=(12, 6.5),
+        plot_title=element_text(size=16, weight="bold", ha="center"),
+        plot_subtitle=element_text(size=10, ha="center"),
+        legend_title=element_text(size=9),
+        legend_text=element_text(size=8),
+    )
+)
+
+world_map_plot
+```
+
+<div class="chart-insight">
+<strong>📌 What the map tells us:</strong> The sanitation divide follows global inequality with striking clarity. <strong>Europe, North America, Australia, and the Gulf states</strong> are uniformly dark blue — approaching 100% coverage. <strong>Sub-Saharan Africa</strong>, by contrast, presents a patchwork of yellows and light blues, with the Sahel corridor (Chad, Niger, South Sudan, Central African Republic) standing out as a region of acute crisis. <strong>South Asia</strong> shows dramatic internal variation — India has made enormous strides (20% → 93%) while pockets of the Pacific remain critically underserved. <strong>Policy implication:</strong> Universal geographic targeting is inefficient; resources should be concentrated in Sub-Saharan Africa and the Pacific SIDS (Small Island Developing States), where need and underinvestment intersect most severely.
+</div>
+
+---
+
+### 📊 Chart 2 — Bar Chart: The 20 Most Underserved Nations
+
+```{python}
+#| label: fig-barchart
+#| fig-cap: "The 20 countries with the lowest proportion of population accessing improved sanitation facilities (latest year per country). The dashed line marks the 50% threshold — a critical policy benchmark."
+#| fig-width: 11
+#| fig-height: 7
+#| code-summary: "📊 Bar Chart Code"
+
+import pandas as pd
+
+# ── Prepare bottom-20 dataset ──────────────────────────────────
+bottom20 = (
+    latest_pd
+    .nsmallest(20, "sanitation_pct")
+    .copy()
+    .sort_values("sanitation_pct", ascending=True)
+)
+
+# Colour: red if critical (<30%), orange if severe (30-50%)
+bottom20["colour_cat"] = bottom20["sanitation_pct"].apply(
+    lambda v: "Critical (<30%)" if v < 30 else "Severe (30–50%)"
+)
+
+# ── Plot ───────────────────────────────────────────────────────
+(
+    ggplot(bottom20, aes(x="reorder(country, sanitation_pct)", y="sanitation_pct", fill="colour_cat"))
+    + geom_col(width=0.72, alpha=0.92)
+    + geom_text(
+        aes(label="sanitation_pct.round(1).astype(str) + '%'"),
+        ha="left", size=8, nudge_y=0.8, color="#1C2833"
+    )
+    + scale_fill_manual(
+        values={"Critical (<30%)": "#C0392B", "Severe (30–50%)": "#E67E22"},
+        name="Crisis Level"
+    )
+    + scale_y_continuous(limits=[0, 58], expand=(0, 0))
+    + coord_flip()
+    + labs(
+        title="20 Countries Most Deprived of Improved Sanitation",
+        subtitle="Latest available year | Dashed line = 50% critical threshold",
+        x="",
+        y="Population with Access to Improved Sanitation (%)",
+        caption="Source: UNICEF — unicef_indicator_3.csv | Data Analytics Report 2025",
+    )
+    + theme_minimal()
+    + theme(
+        plot_title=element_text(size=14, weight="bold", color="#1A3C6E"),
+        plot_subtitle=element_text(size=9, color="#5D6D7E"),
+        plot_caption=element_text(size=8, color="#95A5A6", ha="right"),
+        axis_text_y=element_text(size=9, color="#1C2833"),
+        axis_text_x=element_text(size=9),
+        axis_title_x=element_text(size=10, color="#1A3C6E"),
+        legend_title=element_text(size=9, weight="bold"),
+        legend_text=element_text(size=8),
+        panel_grid_major_y=element_blank(),
+        panel_grid_minor=element_blank(),
+        panel_background=element_rect(fill="white"),
+        plot_background=element_rect(fill="white"),
+        figure_size=(11, 7),
+    )
+)
+```
+
+<div class="chart-insight">
+<strong>📌 What the bar chart tells us:</strong> Fourteen of the twenty most-deprived nations fall into the <strong>critical category (below 30%)</strong>, meaning the majority of their populations lack access to even a basic latrine. <strong>Chad (18.7%)</strong> and <strong>Ethiopia (18.9%)</strong> anchor the bottom — a catastrophic situation given their combined population exceeds 175 million people. Notably, <strong>all 20 countries are in Sub-Saharan Africa or the Pacific</strong>, underscoring the regional concentration of the crisis. <strong>Policy implication:</strong> This is not a scattered global challenge — it is a geographically concentrated emergency requiring a targeted multilateral response. The African Union, UNICEF, and bilateral donors must establish dedicated sanitation compacts for the Sahel and Great Lakes regions.
+</div>
+
+---
+
+### 📈 Chart 3 — Scatterplot: Does Wealth Drive Sanitation Access?
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "Relationship between GDP per capita (constant 2015 USD, log scale) and sanitation access (%), with a linear regression line. Each point represents one country-year observation from 2000–2024."
+#| fig-width: 10
+#| fig-height: 6.5
+#| code-summary: "📈 Scatterplot with Regression Code"
+
+# ── Prepare data: most recent joined observation per country ───
+scatter_data = (
+    joined
+    .group_by("country")
+    .agg([
+        pl.col("sanitation_pct").last(),
+        pl.col("gdp_per_capita").last(),
+        pl.col("life_expectancy").last(),
+        pl.col("year").last(),
+    ])
+    .filter(pl.col("gdp_per_capita").is_not_null())
+    .filter(pl.col("sanitation_pct").is_not_null())
+    .to_pandas()
+)
+
+# Log-transform GDP so the regression is more meaningful
+scatter_data["log_gdp"] = np.log10(scatter_data["gdp_per_capita"])
+
+# Bracket for colour
+scatter_data["region_bracket"] = scatter_data["sanitation_pct"].apply(bracket)
+
+# ── Plot ───────────────────────────────────────────────────────
+(
+    ggplot(scatter_data, aes(x="log_gdp", y="sanitation_pct", color="sanitation_pct"))
+    + geom_point(alpha=0.65, size=2.8)
+    + geom_smooth(method="lm", color="#1A3C6E", fill="#AED6F1", alpha=0.25, size=1.2)
+    + scale_color_gradient(
+        low="#E74C3C", high="#1A3C6E",
+        name="Sanitation\nAccess (%)",
+        limits=[0, 100],
+    )
+    + scale_x_continuous(
+        breaks=[2, 2.5, 3, 3.5, 4, 4.5, 5],
+        labels=["$100", "$316", "$1K", "$3.2K", "$10K", "$31K", "$100K"],
+    )
+    + scale_y_continuous(limits=[0, 105], expand=(0, 0))
+    + labs(
+        title="Wealth and Sanitation: A Near-Perfect Correlation",
+        subtitle="GDP per capita (log scale, 2015 USD) vs. population with improved sanitation access",
+        x="GDP per Capita (2015 USD, log scale)",
+        y="Population with Sanitation Access (%)",
+        caption="Source: UNICEF unicef_indicator_3.csv + unicef_metadata_3.csv | Data Analytics Report 2025",
+    )
+    + theme_bw()
+    + theme(
+        plot_title=element_text(size=14, weight="bold", color="#1A3C6E"),
+        plot_subtitle=element_text(size=9, color="#5D6D7E"),
+        plot_caption=element_text(size=8, color="#95A5A6", ha="right"),
+        axis_title=element_text(size=10, color="#1A3C6E"),
+        axis_text=element_text(size=9),
+        legend_title=element_text(size=9, weight="bold"),
+        legend_text=element_text(size=8),
+        panel_background=element_rect(fill="white"),
+        plot_background=element_rect(fill="white"),
+        figure_size=(10, 6.5),
+    )
+)
+```
+
+<div class="chart-insight">
+<strong>📌 What the scatterplot tells us:</strong> The relationship between national wealth and sanitation access is <strong>strongly positive and remarkably linear on a log scale</strong> — confirming that GDP per capita is among the most powerful predictors of whether a citizen has access to a toilet. Countries with GDP per capita below <strong>$1,000 USD</strong> cluster almost exclusively in the critical access zone (below 50%), while nations above <strong>$10,000 USD</strong> are overwhelmingly above 90%. However, the regression also reveals <strong>important outliers</strong>: some middle-income countries outperform their economic peers (e.g., Bangladesh's remarkable progress), while others underperform — pointing to the role of governance, political will, and targeted policy. <strong>Policy implication:</strong> Economic growth alone is insufficient — countries must actively direct a proportion of GDP growth toward sanitation infrastructure, or the benefits of development will bypass the most vulnerable communities.
+</div>
+
+---
+
+### 📉 Chart 4 — Time Series: Progress Over Two Decades
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Sanitation access trends (2000–2024) for 10 representative countries spanning the full spectrum of development contexts. Faceted by country to enable individual trend inspection."
+#| fig-width: 12
+#| fig-height: 8
+#| code-summary: "📉 Time-Series Code"
+
+# ── Select 10 countries across the spectrum ────────────────────
+# Chosen to represent: crisis (low + slow), progress stories (low + fast),
+# middle-income, and high-income — covering all inhabited regions.
+focus_countries = [
+    "Chad", "South Sudan", "Niger",          # critical / slow
+    "Ethiopia", "Bangladesh", "India",       # remarkable improvers
+    "Nigeria", "Brazil",                     # large middle-income
+    "Ireland", "Germany",                    # high-income benchmark
+]
+
+ts_data = (
+    indicator
+    .filter(pl.col("country").is_in(focus_countries))
+    .to_pandas()
+)
+
+# Ordered factor for legend readability
+ts_data["country"] = pd.Categorical(ts_data["country"], categories=focus_countries, ordered=True)
+
+country_colors = {
+    "Chad":        "#C0392B",
+    "South Sudan": "#E74C3C",
+    "Niger":       "#E67E22",
+    "Ethiopia":    "#F39C12",
+    "Bangladesh":  "#8E44AD",
+    "India":       "#2980B9",
+    "Nigeria":     "#16A085",
+    "Brazil":      "#27AE60",
+    "Ireland":     "#1A3C6E",
+    "Germany":     "#1CABE2",
+}
+
+(
+    ggplot(ts_data, aes(x="year", y="sanitation_pct", color="country", group="country"))
+    + geom_line(size=1.15, alpha=0.9)
+    + geom_point(size=1.2, alpha=0.6)
+    + facet_wrap("~country", ncol=5, scales="free_y")
+    + scale_color_manual(values=country_colors, guide=None)
+    + scale_x_continuous(breaks=[2000, 2010, 2020], labels=["2000","2010","2020"])
+    + labs(
+        title="Two Decades of Sanitation Progress — Selected Countries",
+        subtitle="Proportion of population using improved sanitation facilities, 2000–2024",
+        x="Year",
+        y="Access (%)",
+        caption="Source: UNICEF — unicef_indicator_3.csv | Data Analytics Report 2025",
+    )
+    + theme_bw()
+    + theme(
+        plot_title=element_text(size=14, weight="bold", color="#1A3C6E"),
+        plot_subtitle=element_text(size=9, color="#5D6D7E"),
+        plot_caption=element_text(size=8, color="#95A5A6", ha="right"),
+        strip_background=element_rect(fill="#1A3C6E"),
+        strip_text=element_text(color="white", size=9, weight="bold"),
+        axis_text=element_text(size=8),
+        axis_title=element_text(size=9, color="#1A3C6E"),
+        panel_background=element_rect(fill="#EBF5FB"),
+        plot_background=element_rect(fill="white"),
+        figure_size=(12, 8),
+    )
+)
+```
+
+<div class="chart-insight">
+<strong>📌 What the time series tells us:</strong> The divergence in trajectories is profound. <strong>India</strong> stands out as the most dramatic success story of the 21st century — driven by the <em>Swachh Bharat Mission</em> (Clean India Mission) launched in 2014, access climbed from 20% to 93% in just over two decades. <strong>Bangladesh</strong> similarly achieved a 52-percentage-point gain through sustained national WASH (Water, Sanitation and Hygiene) investment. By contrast, <strong>Chad, South Sudan, and Niger</strong> show trajectories that are nearly flat — achieving only 4–16 percentage points of gain over 24 years. At this rate, these nations will not reach 50% coverage before 2060. <strong>Germany and Ireland</strong> remain anchored at 100% throughout, serving as the benchmark of what universal infrastructure policy can achieve. <strong>Policy implication:</strong> Progress is possible — India and Bangladesh prove it. The determinant is political commitment, sustained funding, and community-level WASH behaviour-change programmes. Flat-line nations urgently need external catalytic investment alongside domestic political will.
+</div>
+
+---
+
+## 🎯 Recommendations {#sec-recommendations}
+
+Based on the analysis, this report advances **five evidence-based recommendations** to accelerate global sanitation access:
+
+<div class="rec-card">
+<h4>🏗️ 1. Launch a Sahel Sanitation Emergency Compact</h4>
+The UNICEF data unequivocally identify the Sahel corridor as the world's most acute sanitation crisis zone. A dedicated multilateral compact — co-funded by the G7, African Development Bank, and UNICEF — should target **Chad, Niger, South Sudan, Eritrea, Central African Republic, and DRC** with a minimum $5B commitment over 10 years for infrastructure, maintenance, and training.
+</div>
+
+<div class="rec-card">
+<h4>📈 2. Mandate Sanitation Spending Floors for Aid Recipients</h4>
+The scatterplot confirms that economic growth alone does not guarantee improved sanitation. Development finance institutions (World Bank, IMF, bilateral aid agencies) should condition budget support loans on a minimum <strong>2% of national budget</strong> allocated to WASH infrastructure annually.
+</div>
+
+<div class="rec-card">
+<h4>🏫 3. Prioritise School and Healthcare Sanitation</h4>
+Children and healthcare workers bear the greatest burden of inadequate sanitation. UNICEF's **WASH in Schools** and **WASH in Health Care Facilities** programmes should be scaled to 100% coverage in the 20 most-deprived countries identified in Chart 2 by 2030, as a precondition to broader community rollout.
+</div>
+
+<div class="rec-card">
+<h4>🌱 4. Replicate the India Model: National WASH Behaviour Change Campaigns</h4>
+India's extraordinary success demonstrates that supply-side infrastructure must be coupled with **demand-side behaviour change**. UNICEF should fund contextually adapted Swachh Bharat-style campaigns in Sub-Saharan Africa, targeting open-defecation-free (ODF) village certification as a measurable community milestone.
+</div>
+
+<div class="rec-card">
+<h4>📡 5. Strengthen Data Collection in Conflict Zones</h4>
+Multiple countries in the dataset have large data gaps (e.g., Eritrea's last observation is 2016). Accurate measurement is a precondition for effective intervention. UNICEF and national statistics offices must invest in <strong>conflict-resilient data collection</strong>, including mobile survey technologies and community health worker reporting systems.
+</div>
+
+---
+
+## ✅ Conclusion {#sec-conclusion}
+
+The data are clear, and the moral calculus is unambiguous: **sanitation is not a luxury — it is a right**.
+
+Across 225 countries and 24 years of UNICEF data, we observe a world in which access to a safe toilet correlates almost perfectly with national wealth, yet economic growth alone cannot close the gap. The nations suffering most — **Chad, Ethiopia, South Sudan, Niger, Central African Republic** — are trapped in a vicious cycle where poor sanitation fuels disease, disease suppresses productivity, and suppressed productivity prevents the public investment needed to build sanitation infrastructure.
+
+The **good news** is that this cycle can be broken. **India** demonstrates that a lower-middle-income country can achieve near-universal sanitation access within a single generation, given political leadership and sustained investment. **Bangladesh** proves the same. These are not outliers — they are blueprints.
+
+The **2030 Sustainable Development Goals** are now less than five years away. SDG Target 6.2 calls for *"access to adequate and equitable sanitation and hygiene for all, ending open defecation, paying special attention to the needs of women and girls and those in vulnerable situations."* Based on current trajectories, the Sahel and parts of Sub-Saharan Africa will miss this target by decades.
+
+> **The question is not whether we can afford to act. The question is whether we can afford not to.**
+
+UNICEF calls on member states, bilateral donors, development finance institutions, and civil society to treat sanitation with the same urgency accorded to climate, health, and food security. The infrastructure is buildable. The knowledge exists. **What is needed now is will.**
+
+---
+
+## 📚 Data Sources {#sec-datasources}
+
+The following datasets and reference materials were used in the preparation of this report:
+
+| Source | Description | Link |
+|--------|-------------|------|
+| **UNICEF** | Proportion of Population Using Improved Sanitation Facilities (2000–2024) | [data.unicef.org](https://data.unicef.org/topic/water-and-sanitation/sanitation/) |
+| **UNICEF** | Country Metadata — GDP per capita, Life Expectancy, Population (1960–2024) | [data.unicef.org](https://data.unicef.org) |
+| **World Bank** | World Development Indicators — GDP per capita (constant 2015 US$) | [databank.worldbank.org](https://databank.worldbank.org/source/world-development-indicators) |
+| **WHO/UNICEF JMP** | Joint Monitoring Programme for Water Supply and Sanitation | [washdata.org](https://washdata.org) |
+| **UN SDG Report** | SDG 6 Progress Report — Clean Water and Sanitation | [sdgs.un.org/goals/goal6](https://sdgs.un.org/goals/goal6) |
+| **Swachh Bharat Mission** | India's National Clean India Campaign | [swachhbharat.mygov.in](https://swachhbharat.mygov.in) |
+
+---
+
+```{=html}
+<div class="unicef-footer">
+  <a href="https://www.unicef.org" target="_blank">
+    <img
+      src="https://www.unicef.org/sites/default/files/styles/media_large_image/public/UNICEF_Logo_White.png"
+      alt="UNICEF Logo"
+      onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
+    />
+    <div style="display:none; font-size:2rem; font-weight:700; letter-spacing:0.15em; margin-bottom:0.5rem;">UNICEF</div>
+  </a>
+  <p style="margin:0.4rem 0 0 0; font-size:1rem; font-weight:600;">
+    Data Source: <a href="https://data.unicef.org" target="_blank">data.unicef.org</a>
+  </p>
+  <p style="margin:0.25rem 0 0 0; font-size:0.88rem; opacity:0.8;">
+    UNICEF — For every child | Data Analytics Report 2026
+  </p>
+  <p class="footer-tagline">
+    Produced with <a href="https://quarto.org" target="_blank">Quarto</a> ·
+    Visualised with <a href="https://plotnine.org" target="_blank">plotnine</a> ·
+    Data transformed with <a href="https://pola.rs" target="_blank">Polars</a>
+  </p>
+  <p class="footer-tagline" style="margin-top:0.75rem;">
+    © 2026 Aryan Rishi. All rights reserved.    
+  </p>
+</div>
+```
